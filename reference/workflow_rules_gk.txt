@@ -1,0 +1,143 @@
+JOBSCHOLAR WORKFLOW — Bangla GK MCQ extraction (LiveMCQ-style screenshots/PDFs)
+================================================================================
+This is a SEPARATE, DIFFERENT workflow from the "Charyapada" project
+(jobscholar_builder.py / workflow_rules.txt with copyright-line + rewritten
+explanations). Do not mix the two rule sets. This file describes the GK project.
+
+PROJECT CONTEXT:
+User runs "JobScholar" — generating Bengali-language MCQ study materials (mostly
+current-affairs / GK topics) from screenshots or PDFs of a "LiveMCQ"-style exam-prep
+app. Workflow: user uploads a tall screenshot image (or a tall single-page PDF export
+of one) of a specific topic -> Claude extracts every question/options/correct
+answer/explanation -> outputs one .xlsx file per topic.
+
+INPUT FORMATS SEEN:
+- Tall .jpg/.png screenshots (sometimes 1 file, sometimes a 2-file set for one topic)
+- Tall single-page PDFs (e.g. 557 x 26760 pt) that are themselves just a rendered
+  screenshot with no extractable text layer — these must be rendered to PNG first
+  (pdftoppm -r 150 -png file.pdf out_prefix) then split/viewed like any screenshot.
+  Always check with pdftotext first; if it returns ~0 chars, it's image-based.
+
+OUTPUT TEMPLATE:
+Sheet "Questions" with 7 columns:
+  question | option_a | option_b | option_c | option_d | correct_key | explanation
+- correct_key is literal lowercase "a"/"b"/"c"/"d" (NOT ক/খ/গ/ঘ).
+- Font Arial throughout, header row bold, wrap_text + vertical="top" alignment on
+  all data cells.
+- Column widths: {"A":50,"B":22,"C":22,"D":22,"E":22,"F":12,"G":85}
+- Filename matches the uploaded screenshot/PDF's base name (minus any "-1"/page
+  suffix), saved to /mnt/user-data/outputs/<topic_name>.xlsx
+
+CORE RULES (different from Charyapada project):
+1. Extract EXACT/VERBATIM explanation text from the source — do NOT rewrite or
+   paraphrase it. No "copyright-safety" rewriting, no copyright line appended.
+2. Question numbers from the screenshot (e.g. "2133.") are NOT typed into the xlsx
+   question cell — only the question text itself, options, and row order matter.
+   (Numbers are used internally to track source range/count, not written to cells.)
+3. The green-highlighted option in the screenshot/PDF = correct answer -> map to
+   a/b/c/d by its position (1st=a, 2nd=b, 3rd=c, 4th=d), regardless of the Bengali
+   ক/খ/গ/ঘ labels shown.
+4. Grey "Explanation" box text = explanation field, copied verbatim (minus the
+   "Live MCQ..." promo removal, see rule 7).
+5. **NEVER fabricate or pad questions.** Deliver exactly the count present in the
+   source, even if less than the typical 50-question batch. If the source itself
+   skips/cancels a question (explicit note like "অপশনে সঠিক উত্তর না থাকায় প্রশ্নটি
+   বাতিল হয়েছে"), exclude it and note the exclusion in the delivery summary.
+6. Genuine source duplicates (same question appearing twice under different source
+   question numbers) are kept as separate rows — do not dedupe those. Only dedupe
+   accidental/extraction-error duplicates.
+7. Strip "Live MCQ" promotional sentences from explanation text via full-sentence
+   regex removal (see strip_live() in the builder module) — never leave partial
+   fragments behind.
+8. Append a topic-appropriate citation line to the END of every explanation,
+   using a `D` constant (varies per topic — e.g. official org website name,
+   Bangladesh Economic Survey, Wikipedia-style reference, etc.). This is NOT a
+   copyright notice — it's the "তথ্যসূত্র: ..." (source) line already present in
+   most screenshots; standardize it per-topic via the D variable.
+9. If an explanation's citation varies row-to-row in the source (different
+   agency per question, e.g. UNEP vs UNFCCC vs IUCN), prefer keeping each row's
+   own actual citation rather than forcing a single generic D when possible, but
+   a sensible generic D as a fallback/suffix is acceptable and has been the
+   established practice this session.
+
+TECHNICAL APPROACH FOR LONG IMAGES/PDFS:
+```python
+from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
+img = Image.open('/path/to/image_or_rendered_pdf_page.png')
+w, h = img.size
+chunk_h = 4500
+for i, y in enumerate(range(0, h, chunk_h)):
+    img.crop((0, y, w, min(y + chunk_h, h))).save(f'/home/claude/chunks/part_{i:02d}.png')
+```
+For a PDF input:
+```bash
+pdfinfo file.pdf                 # check page count / size (image-based if 1 huge page)
+pdftotext file.pdf - | wc -c     # ~0 chars => image-based, must render
+pdftoppm -r 150 -png file.pdf out_prefix
+```
+Then view each chunk sequentially with the Read tool (2 chunks per call is fine),
+extracting every MCQ into a Python list via the builder's `r(...)`-style append
+pattern, working top-to-bottom in source order (which is numerically descending,
+e.g. 2133 -> 2084).
+
+BUILDER PATTERN (USE THIS — see jobscholar_gk_builder.py):
+```python
+from jobscholar_gk_builder import build, validate, D
+
+R = []
+def r(q, a, b, c, d, key, exp):
+    R.append([q, a, b, c, d, key, exp])
+
+r("question text", "opt_a", "opt_b", "opt_c", "opt_d", "b", "explanation text" + D)
+# ... more rows ...
+
+out = build(R, "topic_filename_slug")
+validate(out)
+```
+Use triple-double-quoted strings (`"""..."""`) for every field — this avoids the
+recurring SyntaxError issue from Bengali text containing internal `"` characters
+(e.g. quoted terms like "থুসিডাইডিসের ফাঁদ") breaking a normal double-quoted
+Python string literal.
+
+CHUNKED WRITING (resumable on failure):
+For large sets (40-50+ questions), build the script in batches via the Edit tool:
+1. Write initial script with imports + first ~15-20 rows + a print(len(R)) sanity
+   check marker.
+2. Run it to confirm the batch parses with no SyntaxError before adding more.
+3. Edit-insert the next batch of rows before the print marker; repeat.
+4. Once all rows are in, append the build()+validate() call and run once more.
+This keeps a syntax error isolated to the batch just added rather than forcing a
+re-check of the whole 50-row file.
+
+VALIDATION (always run after building, before delivery):
+- Row count matches exact source count (not padded/truncated).
+- No empty fields in any cell.
+- No bad/invalid correct_key values (only a/b/c/d allowed).
+- No residual "live mcq" text (case-insensitive) in any explanation.
+- No duplicate (question, opt_a, opt_b, opt_c, opt_d) tuples, except genuine
+  source duplicates (verify these by eye before accepting).
+`validate(path)` in the builder module runs all of these and prints a report.
+
+DELIVERY MESSAGE:
+After validation passes, call SendUserFile with the output path. The accompanying
+message should note:
+- Topic name / subject covered (in a short sentence, not just the filename).
+- Exact question-number range from source (e.g. "Q2133 -> Q2084").
+- Total question count delivered (and why, if less than 50 — fewer in source,
+  or a cancelled question excluded).
+- Any notable sub-topics/organizations/entities covered, if the topic is broad
+  (helps the user sanity-check coverage at a glance).
+
+NAMING CONVENTION:
+Output filename = the uploaded file's base topic name (snake_case, Bengali
+romanized/transliterated the way the user named their own upload), with any
+numeric/page suffix like "-1" dropped. E.g. upload
+`jati_shongo_o_jatishongo_bishoyok-1.pdf` -> output
+`jati_shongo_o_jatishongo_bishoyok.xlsx`.
+
+HOW TO START A NEW CHAT WITH THIS WORKFLOW:
+1. Upload this file (workflow_rules_gk.txt) and jobscholar_gk_builder.py.
+2. Upload the new topic's screenshot(s) or PDF.
+3. Say: "Follow workflow_rules_gk.txt using jobscholar_gk_builder.py. Process the
+   attached [topic] file into an xlsx the same way as before."

@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCQ Sheet Maker</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#667085; --line:#d9dde3;
+          --accent:#1f7a4d; --accent-2:#e8f4ee; --err:#b42318; --warn:#9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2128; --text:#e7e9ee; --muted:#9aa3b2; --line:#323844;
+            --accent:#4cc38a; --accent-2:#1b2e25; --err:#ff8a80; --warn:#e3b341; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:16px/1.5 system-ui, -apple-system, "Segoe UI", "Noto Sans Bengali", sans-serif; }
+  main { max-width:640px; margin:40px auto; padding:0 16px; }
+  h1 { font-size:1.5rem; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:28px 16px; text-align:center;
+          cursor:pointer; transition:.15s; }
+  .drop.over, .drop:hover { border-color:var(--accent); background:var(--accent-2); }
+  .drop input { display:none; }
+  .files { margin:8px 0 0; padding:0; list-style:none; color:var(--muted); font-size:.9rem; }
+  label.f { display:block; font-weight:600; margin:16px 0 4px; font-size:.9rem; }
+  input[type=text] { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px;
+                     background:var(--bg); color:var(--text); font:inherit; }
+  .hint { color:var(--muted); font-size:.82rem; margin-top:4px; }
+  .check { display:flex; gap:8px; align-items:center; margin-top:8px; font-size:.9rem; }
+  button { margin-top:20px; width:100%; padding:12px; border:0; border-radius:8px;
+           background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #out { margin-top:20px; }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:8px 0; }
+  .bar div { height:100%; width:0; background:var(--accent); transition:width .3s; }
+  .err { color:var(--err); }
+  .warn { color:var(--warn); font-size:.9rem; }
+  a.dl { display:inline-block; margin-top:12px; padding:10px 16px; border-radius:8px;
+         background:var(--accent); color:#fff; text-decoration:none; font-weight:600; }
+  table { border-collapse:collapse; margin-top:12px; font-size:.88rem; }
+  td { padding:2px 12px 2px 0; } td:first-child { color:var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>MCQ Sheet Maker</h1>
+  <p class="sub">Upload a long screenshot or PDF of MCQs and get the 7-column xlsx sheet.</p>
+
+  <form id="form" class="card">
+    <div class="drop" id="drop">
+      <input type="file" id="files" name="files" multiple accept=".png,.jpg,.jpeg,.webp,.pdf">
+      <strong>Click or drop files here</strong>
+      <div class="hint">PNG / JPG / PDF. Several files = one topic, in order.</div>
+      <ul class="files" id="list"></ul>
+    </div>
+
+    <label class="f" for="name">Sheet name (optional)</label>
+    <input type="text" id="name" name="name" placeholder="defaults to the first file's name">
+
+    <label class="f" for="citation">Citation line (optional)</label>
+    <input type="text" id="citation" name="citation" placeholder="তথ্যসূত্র: সংশ্লিষ্ট সংস্থার অফিসিয়াল ওয়েবসাইট।">
+    <div class="hint">Added to explanations that have no তথ্যসূত্র line of their own.</div>
+    <label class="check"><input type="checkbox" name="replace_citation"> Use this line on every row (replace the source's own)</label>
+
+    <button id="go" type="submit">Make sheet</button>
+  </form>
+
+  <div id="out"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const input = $("files"), drop = $("drop"), out = $("out");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function showFiles() {
+  $("list").innerHTML = [...input.files].map(f => `<li>${esc(f.name)}</li>`).join("");
+}
+drop.onclick = () => input.click();
+input.onchange = showFiles;
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => {
+  e.preventDefault(); drop.classList.remove("over");
+  input.files = e.dataTransfer.files; showFiles();
+};
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  if (!input.files.length) { out.innerHTML = `<p class="err">Choose a file first.</p>`; return; }
+  $("go").disabled = true;
+  out.innerHTML = `<div class="card"><div id="msg">Uploading…</div><div class="bar"><div id="bar"></div></div></div>`;
+  try {
+    const res = await fetch("/upload", { method: "POST", body: new FormData($("form")) });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || "Upload failed");
+    poll(j.job);
+  } catch (err) { fail(err.message); }
+};
+
+function fail(msg) {
+  out.innerHTML = `<div class="card err">${esc(msg)}</div>`;
+  $("go").disabled = false;
+}
+
+async function poll(id) {
+  const j = await (await fetch(`/status/${id}`)).json();
+  if (j.status === "error") return fail(j.error);
+  if (j.status === "done") return finish(id, j);
+  $("msg").textContent = j.total ? `Reading part ${j.done} of ${j.total}…` : "Preparing images…";
+  $("bar").style.width = j.total ? `${100 * j.done / j.total}%` : "5%";
+  setTimeout(() => poll(id), 2000);
+}
+
+function finish(id, j) {
+  const r = j.report;
+  const issues = r.empty_field_rows.length + r.bad_keys.length + r.live_mcq_rows.length + r.duplicate_row_pairs.length;
+  out.innerHTML = `<div class="card">
+    <strong>${j.count} questions</strong>${j.range ? ` · ${esc(j.range)}` : ""}
+    <table>
+      <tr><td>Rows</td><td>${r.row_count}</td></tr>
+      <tr><td>Empty-field rows</td><td>${r.empty_field_rows.join(", ") || "none"}</td></tr>
+      <tr><td>Bad answer keys</td><td>${r.bad_keys.join(", ") || "none"}</td></tr>
+      <tr><td>“Live MCQ” left</td><td>${r.live_mcq_rows.join(", ") || "none"}</td></tr>
+      <tr><td>Duplicate rows</td><td>${r.duplicate_row_pairs.map(p => p.join("&")).join(", ") || "none"}</td></tr>
+    </table>
+    ${j.notes.length ? `<ul class="warn">${j.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    ${issues ? `<p class="warn">Validation found issues — check those rows before using the sheet.</p>` : ""}
+    <a class="dl" href="/download/${id}">Download ${esc(j.filename)}</a>
+  </div>`;
+  $("go").disabled = false;
+}
+</script>
+</body>
+</html>
